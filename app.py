@@ -224,8 +224,8 @@ def speed_adjust_segment(index, video_segment, audio_path, adjusted_dir):
 
         cmd = ['ffmpeg', '-y', '-i', video_segment, '-i', audio_path,
                '-filter_complex', filter_complex, '-map', '[v_concat]', '-map', '[a_concat]',
-               '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac',
-               '-shortest', output_path]
+               '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'copy',
+               output_path]
 
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if result.returncode == 0 and os.path.exists(output_path):
