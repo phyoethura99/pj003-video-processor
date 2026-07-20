@@ -240,7 +240,7 @@ def speed_adjust_segment(index, video_segment, audio_path, adjusted_dir):
 
         cmd = ['ffmpeg', '-y', '-i', video_segment, '-i', audio_path,
                '-filter_complex', filter_complex, '-map', '[v_concat]', '-map', '[a_concat]',
-               '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'copy',
+               '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac',
                output_path]
 
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -531,11 +531,9 @@ def main():
                 progress_detail = st.empty()
                 step_start = time.time()
 
-                # Generate TTS one by one with progress
-                progress_detail.markdown(f"🔊 Generating TTS 1/{num_paragraphs}...")
-                for i, paragraph in enumerate(paragraphs):
-                    asyncio.run(generate_tts_async(paragraph, os.path.join(audio_dir, f"audio_{i}.mp3"), voice_id, final_speed, final_pitch))
-                    progress_detail.markdown(f"🔊 Generating TTS {i+2}/{num_paragraphs}...")
+                # Generate TTS in parallel with interval progress
+                progress_detail.markdown(f"🔊 Generating {num_paragraphs} TTS files in parallel...")
+                asyncio.run(generate_all_tts(paragraphs, audio_dir, voice_id, final_speed, final_pitch))
                 progress_detail.markdown(f"✅ TTS complete ({num_paragraphs}/{num_paragraphs})")
 
                 # Split video
