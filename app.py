@@ -157,7 +157,7 @@ def split_video(video_path, num_segments, output_dir):
         start_time = i * segment_duration
         output_path = os.path.join(output_dir, f"segment_{i}.mp4")
         cmd = ['ffmpeg', '-y', '-ss', str(start_time), '-t', str(segment_duration),
-               '-i', video_path, '-c:v', 'copy', '-c:a', 'copy',
+               '-i', video_path, '-c:v', 'copy', '-an',
                '-avoid_negative_ts', 'make_zero', output_path]
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         segments.append(output_path)
