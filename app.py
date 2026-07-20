@@ -62,8 +62,15 @@ def count_paragraphs(text):
 
 def generate_tts(text, output_path, voice_id="v1", speed=0, pitch=0):
     """Generate TTS audio using edge_tts"""
-    # Use a default English voice for now (in production, map to actual Myanmar voices)
-    real_voice = "en-US-AriaNeural"
+    # Mapping custom voice IDs to actual edge_tts Myanmar voices
+    # my-MM-NilarNeural (Female), my-MM-ThihaNeural (Male)
+    
+    # Simple mapping: odd IDs to Nilar (Female), even IDs to Thiha (Male)
+    voice_num = int(voice_id.replace('v', ''))
+    if voice_num % 2 == 0:
+        real_voice = "my-MM-ThihaNeural"
+    else:
+        real_voice = "my-MM-NilarNeural"
     
     # Format rate and pitch for edge_tts
     rate_str = f"+{speed}%" if speed >= 0 else f"{speed}%"
