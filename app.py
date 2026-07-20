@@ -61,37 +61,21 @@ def count_paragraphs(text):
     return paragraphs
 
 def generate_tts(text, output_path, voice_id="v1", speed=0, pitch=0):
-    """Generate TTS audio using edge_tts"""
-    # Mapping custom voice IDs to actual edge_tts Myanmar voices
-    # my-MM-NilarNeural (Female), my-MM-ThihaNeural (Male)
-    
-    # Simple mapping: odd IDs to Nilar (Female), even IDs to Thiha (Male)
+    """Generate TTS audio using edge_tts with actual Myanmar voices"""
     voice_num = int(voice_id.replace('v', ''))
     if voice_num % 2 == 0:
         real_voice = "my-MM-ThihaNeural"
     else:
         real_voice = "my-MM-NilarNeural"
     
-    # Format rate and pitch for edge_tts
     rate_str = f"+{speed}%" if speed >= 0 else f"{speed}%"
     pitch_str = f"+{pitch}Hz" if pitch >= 0 else f"{pitch}Hz"
     
     async def _generate():
-        try:
-            communicate = edge_tts.Communicate(text, real_voice, rate=rate_str, pitch=pitch_str)
-            await communicate.save(output_path)
-        except Exception as e:
-            # Fallback to English voice if Myanmar voice fails
-            fallback_voice = "en-US-AriaNeural"
-            communicate = edge_tts.Communicate(text, fallback_voice, rate=rate_str, pitch=pitch_str)
-            await communicate.save(output_path)
+        communicate = edge_tts.Communicate(text, real_voice, rate=rate_str, pitch=pitch_str)
+        await communicate.save(output_path)
         
-    try:
-        asyncio.run(_generate())
-    except Exception as e:
-        # Final fallback: create an empty audio file if everything fails
-        subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono', '-t', '1', output_path])
-        
+    asyncio.run(_generate())
     return output_path
 
 def get_video_duration(video_path):
@@ -136,115 +120,68 @@ def process_segment(index, text, video_segment, audio_dir, final_segments_dir, v
     generate_tts(text, audio_path, voice_id, speed, pitch)
     
     audio_duration = get_audio_duration(audio_path)
-    
-    # 2. Get original video segment duration
     orig_segment_duration = get_video_duration(video_segment)
-    
-    # 3. Create output path
     output_segment = os.path.join(final_segments_dir, f"segment_{index}.mp4")
     
-    # 4. Build FFmpeg filter complex for play/freeze/zoom cycles
-    # Calculate the number of cycles needed
+    # 2. Build FFmpeg filter complex
     cycle_duration = play_dur + freeze1_dur + freeze2_dur
     num_cycles = math.ceil(audio_duration / cycle_duration)
     
-    # Define zoom filters
     zoom_in_filter = "zoompan=z='min(zoom+0.0015,1.1)':d=1:s=hd720:fps=30"
     zoom_out_filter = "zoompan=z='max(zoom-0.0015,1.0)':d=1:s=hd720:fps=30"
     no_zoom_filter = "null"
     
-    freeze1_zoom_filter = no_zoom_filter
-    if freeze1_zoom == "Zoom In":
-        freeze1_zoom_filter = zoom_in_filter
-    elif freeze1_zoom == "Zoom Out":
-        freeze1_zoom_filter = zoom_out_filter
+    f1_zoom = zoom_in_filter if freeze1_zoom == "Zoom In" else (zoom_out_filter if freeze1_zoom == "Zoom Out" else no_zoom_filter)
+    f2_zoom = zoom_in_filter if freeze2_zoom == "Zoom In" else (zoom_out_filter if freeze2_zoom == "Zoom Out" else no_zoom_filter)
     
-    freeze2_zoom_filter = no_zoom_filter
-    if freeze2_zoom == "Zoom In":
-        freeze2_zoom_filter = zoom_in_filter
-    elif freeze2_zoom == "Zoom Out":
-        freeze2_zoom_filter = zoom_out_filter
-    
-    # Build filter complex
     filter_parts = []
     concat_inputs = []
-    
-    # First, speed adjust the entire video
     speed_factor = audio_duration / orig_segment_duration
     filter_parts.append(f"[0:v]setpts=PTS*{speed_factor}[v_speed_adjusted];")
     
-    # Create play/freeze cycles
     for i in range(num_cycles):
-        current_cycle_start = i * cycle_duration
+        curr_start = i * cycle_duration
         
-        # Play segment
-        play_start = current_cycle_start
-        play_end = current_cycle_start + play_dur
-        filter_parts.append(
-            f"[v_speed_adjusted]trim=start={play_start}:end={play_end},setpts=PTS-STARTPTS[vplay_{i}];"
-        )
+        # Play
+        p_start, p_end = curr_start, curr_start + play_dur
+        filter_parts.append(f"[v_speed_adjusted]trim=start={p_start}:end={p_end},setpts=PTS-STARTPTS[vplay_{i}];")
         concat_inputs.append(f"[vplay_{i}]")
         
         # Freeze 1
-        freeze1_start = current_cycle_start + play_dur
-        filter_parts.append(
-            f"[v_speed_adjusted]trim=start={freeze1_start},select=eq(n\\,0),setpts=PTS-STARTPTS,loop=loop=-1:size=1:start=0,trim=duration={freeze1_dur},{freeze1_zoom_filter}[vfreeze1_{i}];"
-        )
+        f1_start = curr_start + play_dur
+        filter_parts.append(f"[v_speed_adjusted]trim=start={f1_start},select=eq(n\\,0),setpts=PTS-STARTPTS,loop=loop=-1:size=1:start=0,trim=duration={freeze1_dur},{f1_zoom}[vfreeze1_{i}];")
         concat_inputs.append(f"[vfreeze1_{i}]")
         
         # Freeze 2
-        freeze2_start = current_cycle_start + play_dur + freeze1_dur
-        filter_parts.append(
-            f"[v_speed_adjusted]trim=start={freeze2_start},select=eq(n\\,0),setpts=PTS-STARTPTS,loop=loop=-1:size=1:start=0,trim=duration={freeze2_dur},{freeze2_zoom_filter}[vfreeze2_{i}];"
-        )
+        f2_start = curr_start + play_dur + freeze1_dur
+        filter_parts.append(f"[v_speed_adjusted]trim=start={f2_start},select=eq(n\\,0),setpts=PTS-STARTPTS,loop=loop=-1:size=1:start=0,trim=duration={freeze2_dur},{f2_zoom}[vfreeze2_{i}];")
         concat_inputs.append(f"[vfreeze2_{i}]")
     
-    # Concatenate all segments
     filter_parts.append(f"{''.join(concat_inputs)}concat=n={len(concat_inputs)}:v=1:a=0[vcombined];")
-    
-    # Add audio and trim to audio duration
     filter_complex = ''.join(filter_parts) + f"[vcombined][1:a]concat=n=1:v=1:a=1,trim=duration={audio_duration}[v]"
     
-    # 5. Execute FFmpeg command
-    cmd = [
-        'ffmpeg', '-y', '-i', video_segment, '-i', audio_path,
-        '-filter_complex', filter_complex,
-        '-map', '[v]', '-shortest', output_segment
-    ]
-    
+    cmd = ['ffmpeg', '-y', '-i', video_segment, '-i', audio_path, '-filter_complex', filter_complex, '-map', '[v]', '-shortest', output_segment]
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return output_segment
 
 def merge_videos(video_list, output_path):
     """Merge multiple video segments into one"""
-    # Create a file with list of videos to concatenate
     concat_file = "concat_list.txt"
     with open(concat_file, 'w') as f:
         for video in video_list:
             f.write(f"file '{os.path.abspath(video)}'\n")
     
-    cmd = [
-        'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_file,
-        '-c', 'copy', output_path
-    ]
+    cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_file, '-c', 'copy', output_path]
     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    os.remove(concat_file)
+    if os.path.exists(concat_file):
+        os.remove(concat_file)
 
 def main():
     st.title("🎬 Video & Text Processor with TTS")
-    st.markdown("""
-    This application processes text and video together:
-    - Splits text into paragraphs
-    - Generates TTS audio for each paragraph
-    - Splits video into segments matching paragraph count
-    - Applies custom play/freeze/zoom effects
-    - Merges everything into a final video
-    """)
+    st.markdown("Processing text and video with custom effects and Myanmar TTS.")
 
     with st.sidebar:
         st.header("⚙️ Settings")
-        
-        st.subheader("1️⃣ Voice Settings")
         selected_voice = st.selectbox("Select Voice", options=[v["name"] for v in VOICES])
         voice_id = next(v["id"] for v in VOICES if v["name"] == selected_voice)
         
@@ -258,100 +195,76 @@ def main():
             
         final_speed = style_data["speed"] + emotion_data["s"]
         final_pitch = style_data["pitch"] + emotion_data["p"]
-        
-        st.caption(f"📊 Applied Speed: {final_speed}%, Pitch: {final_pitch}Hz")
+        st.caption(f"📊 Speed: {final_speed}%, Pitch: {final_pitch}Hz")
         
         st.markdown("---")
-        st.subheader("2️⃣ Video Editing")
-        play_duration = st.slider("▶️ Play Duration (seconds)", min_value=1, max_value=5, value=3)
-        
+        play_duration = st.slider("▶️ Play Duration (s)", 1, 5, 3)
         col3, col4 = st.columns(2)
         with col3:
-            freeze1_duration = st.slider("❄️ Freeze 1 Duration (seconds)", min_value=1, max_value=3, value=1)
-            freeze1_zoom = st.selectbox("Freeze 1 Zoom", options=["None", "Zoom In", "Zoom Out"])
+            freeze1_duration = st.slider("❄️ Freeze 1 (s)", 1, 3, 1)
+            freeze1_zoom = st.selectbox("Zoom 1", ["None", "Zoom In", "Zoom Out"])
         with col4:
-            freeze2_duration = st.slider("❄️ Freeze 2 Duration (seconds)", min_value=1, max_value=3, value=1)
-            freeze2_zoom = st.selectbox("Freeze 2 Zoom", options=["None", "Zoom In", "Zoom Out"])
+            freeze2_duration = st.slider("❄️ Freeze 2 (s)", 1, 3, 1)
+            freeze2_zoom = st.selectbox("Zoom 2", ["None", "Zoom In", "Zoom Out"])
             
         st.markdown("---")
-        st.subheader("3️⃣ Content")
-        text_input = st.text_area("📝 Enter Text (Unlimited words)", height=300)
-        
-        # Display paragraph and character counts
+        text_input = st.text_area("📝 Enter Text", height=200)
         if text_input:
             paragraphs = count_paragraphs(text_input)
-            num_paragraphs = len(paragraphs)
-            num_characters = len(text_input)
-            st.info(f"📊 **Paragraphs:** {num_paragraphs} | **Characters:** {num_characters}")
+            st.info(f"📊 Paragraphs: {len(paragraphs)} | Characters: {len(text_input)}")
         
-        video_file = st.file_uploader("🎥 Upload Video (Max 2GB, 1 Hour)", type=["mp4", "mov", "avi"])
+        video_file = st.file_uploader("🎥 Upload Video", type=["mp4", "mov", "avi"])
 
-    if st.button("🚀 Start Processing", key="process_btn"):
+    if st.button("🚀 Start Processing"):
         if not text_input or not video_file:
             st.error("❌ Please provide both text and a video file.")
             return
         
-        # Create temp directories
         temp_dir = "temp_processing"
-        audio_dir = os.path.join(temp_dir, "audio")
-        video_dir = os.path.join(temp_dir, "video")
-        final_segments_dir = os.path.join(temp_dir, "final_segments")
+        audio_dir, video_dir, final_segments_dir = [os.path.join(temp_dir, d) for d in ["audio", "video", "final_segments"]]
+        for d in [audio_dir, video_dir, final_segments_dir]: os.makedirs(d, exist_ok=True)
         
-        os.makedirs(audio_dir, exist_ok=True)
-        os.makedirs(video_dir, exist_ok=True)
-        os.makedirs(final_segments_dir, exist_ok=True)
-        
-        # Save uploaded video
         video_path = os.path.join(video_dir, "input_video.mp4")
-        with open(video_path, "wb") as f:
-            f.write(video_file.read())
+        with open(video_path, "wb") as f: f.write(video_file.read())
         
-        # Count paragraphs
         paragraphs = count_paragraphs(text_input)
         num_paragraphs = len(paragraphs)
         
-        st.info(f"📊 Processing {num_paragraphs} paragraphs...")
-        
-        # Split video
-        video_segments, segment_duration = split_video(video_path, num_paragraphs)
-        
-        # Process segments in parallel
-        final_video_segments = [None] * num_paragraphs
+        # UI for detailed progress
+        status_placeholder = st.empty()
         progress_bar = st.progress(0)
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_index = {
-                executor.submit(process_segment, i, paragraphs[i], video_segments[i], audio_dir, final_segments_dir, voice_id, final_speed, final_pitch, play_duration, freeze1_duration, freeze1_zoom, freeze2_duration, freeze2_zoom): i 
-                for i in range(num_paragraphs)
-            }
+        with st.status("🚀 Processing...", expanded=True) as status:
+            st.write("🎞️ Splitting video into segments...")
+            video_segments, _ = split_video(video_path, num_paragraphs)
             
+            final_video_segments = [None] * num_paragraphs
             completed = 0
-            for future in concurrent.futures.as_completed(future_to_index):
-                index = future_to_index[future]
-                try:
-                    final_video_segments[index] = future.result()
-                    completed += 1
-                    progress_bar.progress(completed / num_paragraphs)
-                except Exception as e:
-                    st.error(f"❌ Error processing segment {index}: {str(e)}")
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                future_to_index = {
+                    executor.submit(process_segment, i, paragraphs[i], video_segments[i], audio_dir, final_segments_dir, voice_id, final_speed, final_pitch, play_duration, freeze1_duration, freeze1_zoom, freeze2_duration, freeze2_zoom): i 
+                    for i in range(num_paragraphs)
+                }
+                
+                for future in concurrent.futures.as_completed(future_to_index):
+                    index = future_to_index[future]
+                    try:
+                        final_video_segments[index] = future.result()
+                        completed += 1
+                        st.write(f"✅ Segment {index+1}/{num_paragraphs} complete")
+                        progress_bar.progress(completed / num_paragraphs)
+                    except Exception as e:
+                        st.error(f"❌ Error in segment {index+1}: {str(e)}")
+            
+            st.write("🎞️ Merging final video...")
+            output_video = "final_output.mp4"
+            merge_videos(final_video_segments, output_video)
+            status.update(label="✅ Processing Complete!", state="complete")
         
-        # Merge final video
-        st.info("🎞️ Merging video segments...")
-        output_video = "final_output.mp4"
-        merge_videos(final_video_segments, output_video)
-        
-        # Provide download
         with open(output_video, "rb") as f:
-            st.download_button(
-                label="📥 Download Final Video",
-                data=f.read(),
-                file_name="output_video.mp4",
-                mime="video/mp4"
-            )
+            st.download_button("📥 Download Final Video", f.read(), "output_video.mp4", "video/mp4")
         
-        st.success("✅ Processing complete!")
-        
-        # Cleanup
         import shutil
         shutil.rmtree(temp_dir, ignore_errors=True)
 
