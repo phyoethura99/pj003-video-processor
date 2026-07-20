@@ -241,7 +241,7 @@ def main():
             final_video_segments = [None] * num_paragraphs
             completed = 0
             
-            with concurrent.futures.ThreadPoolExecutor(max_workers=7) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 future_to_index = {
                     executor.submit(process_segment, i, paragraphs[i], video_segments[i], audio_dir, final_segments_dir, voice_id, final_speed, final_pitch, play_duration, freeze1_duration, freeze1_zoom, freeze2_duration, freeze2_zoom): i 
                     for i in range(num_paragraphs)
