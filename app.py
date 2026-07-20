@@ -498,7 +498,7 @@ def main():
             step_start = time.time()
             st.write("⚡ Speed-adjusting segments to match TTS audio...")
             adjusted_segments = [None] * num_paragraphs
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                 futures = {
                     executor.submit(
                         speed_adjust_segment,
@@ -538,8 +538,7 @@ def main():
             completed_chunks = 0
             step56_start = time.time()
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                # Submit first 2 chunks to start the pipeline
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 # Split all chunks first (instant copy), then process in parallel
                 chunk_paths = []
                 chunk_durations = []
