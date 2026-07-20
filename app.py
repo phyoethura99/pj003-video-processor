@@ -67,20 +67,20 @@ class LiveTimer:
 @st.cache_resource
 def get_voices():
     return [
-        {"id": "v1", "name": "ကို စိုင်းစိုင်း", "gender": "ယောက်ျားလေး"},
-        {"id": "v2", "name": "မဖွေးဖွေး", "gender": "မိန်းကလေး"},
-        {"id": "v3", "name": "ကို နေတိုး", "gender": "ယောက်ျားလေး"},
-        {"id": "v4", "name": "ကို အောင်ရဲလင်း", "gender": "ယောက်ျားလေး"},
-        {"id": "v5", "name": "ကို မြင့်မြတ်", "gender": "ယောက်ျားလေး"},
-        {"id": "v6", "name": "မဝတ်မှုံ ရွှေရည်", "gender": "မိန်းကလေး"},
-        {"id": "v7", "name": "ကို ဒေါင်း", "gender": "ယောက်ျားလေး"},
-        {"id": "v8", "name": "မသက်မွန်မြင့်", "gender": "မိန်းကလေး"},
-        {"id": "v9", "name": "ကို လူ မင်း", "gender": "ယောက်ျားလေး"},
-        {"id": "v10", "name": "မအိန္ဒြာကျော်ဇင်", "gender": "မိန်းကလေး"},
-        {"id": "v11", "name": "မရွှေမှုံ ရတီ", "gender": "မိန်းကလေး"},
-        {"id": "v12", "name": "ကို ပြေတီဦး", "gender": "ယောက်ျားလေး"},
-        {"id": "v13", "name": "မသင်ဇာဝင့်ကျော်", "gender": "မိန်းကလေး"},
-        {"id": "v14", "name": "ကို ပိုင်တံခွန်", "gender": "ယောက်ျားလေး"}
+        {"id": "v1", "name": "V1 ♂", "gender": "Male"},
+        {"id": "v2", "name": "V2 ♀", "gender": "Female"},
+        {"id": "v3", "name": "V3 ♂", "gender": "Male"},
+        {"id": "v4", "name": "V4 ♂", "gender": "Male"},
+        {"id": "v5", "name": "V5 ♂", "gender": "Male"},
+        {"id": "v6", "name": "V6 ♀", "gender": "Female"},
+        {"id": "v7", "name": "V7 ♂", "gender": "Male"},
+        {"id": "v8", "name": "V8 ♀", "gender": "Female"},
+        {"id": "v9", "name": "V9 ♂", "gender": "Male"},
+        {"id": "v10", "name": "V10 ♀", "gender": "Female"},
+        {"id": "v11", "name": "V11 ♀", "gender": "Female"},
+        {"id": "v12", "name": "V12 ♂", "gender": "Male"},
+        {"id": "v13", "name": "V13 ♀", "gender": "Female"},
+        {"id": "v14", "name": "V14 ♂", "gender": "Male"}
     ]
 
 @st.cache_resource
@@ -138,10 +138,26 @@ async def generate_all_tts(paragraphs, audio_dir, voice_id, speed, pitch):
     await asyncio.gather(*tasks)
 
 
+VOICE_MAP = {
+    "v1": "my-MM-ThihaNeural",
+    "v2": "my-MM-NilarNeural",
+    "v3": "it-IT-GianniNeural",
+    "v4": "en-AU-WilliamMultilingualNeural",
+    "v5": "en-US-AndrewMultilingualNeural",
+    "v6": "en-US-AvaMultilingualNeural",
+    "v7": "en-US-BrianMultilingualNeural",
+    "v8": "en-US-EmmaMultilingualNeural",
+    "v9": "fr-FR-RemyMultilingualNeural",
+    "v10": "fr-FR-VivienneMultilingualNeural",
+    "v11": "de-DE-SeraphinaMultilingualNeural",
+    "v12": "de-DE-FlorianMultilingualNeural",
+    "v13": "pt-BR-ThalitaMultilingualNeural",
+    "v14": "ko-KR-HyunsuMultilingualNeural"
+}
+
 async def generate_tts_async(text, output_path, voice_id, speed, pitch):
     """Async TTS generation for parallel execution."""
-    voice_num = int(voice_id.replace('v', ''))
-    real_voice = "my-MM-ThihaNeural" if voice_num % 2 == 0 else "my-MM-NilarNeural"
+    real_voice = VOICE_MAP.get(voice_id, "my-MM-ThihaNeural")
     rate_str = f"+{speed}%" if speed >= 0 else f"{speed}%"
     pitch_str = f"+{pitch}Hz" if pitch >= 0 else f"{pitch}Hz"
     communicate = edge_tts.Communicate(text, real_voice, rate=rate_str, pitch=pitch_str)
