@@ -66,18 +66,22 @@ EMOTIONS = get_emotions()
 
 st.set_page_config(page_title="Video & Text Processor", layout="wide")
 
+
 def count_paragraphs(text):
     paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
     return paragraphs
 
+
+# ─────────────────────────────────────────────
+# TTS Generation
+# ─────────────────────────────────────────────
+
 def generate_tts(text, output_path, voice_id="v1", speed=0, pitch=0):
-    """Generate TTS with thread-safe asyncio loop to prevent event loop crashes."""
+    """Generate TTS with thread-safe asyncio loop."""
     voice_num = int(voice_id.replace('v', ''))
     real_voice = "my-MM-ThihaNeural" if voice_num % 2 == 0 else "my-MM-NilarNeural"
     rate_str = f"+{speed}%" if speed >= 0 else f"{speed}%"
     pitch_str = f"+{pitch}Hz" if pitch >= 0 else f"{pitch}Hz"
-    
-    # Create a new event loop for this thread (thread-safe)
     loop = asyncio.new_event_loop()
     try:
         async def _generate():
@@ -88,12 +92,14 @@ def generate_tts(text, output_path, voice_id="v1", speed=0, pitch=0):
         loop.close()
     return output_path
 
+
 async def generate_all_tts(paragraphs, audio_dir, voice_id, speed, pitch):
-    """Generate TTS for all paragraphs in parallel using asyncio.gather (network I/O safe)."""
+    """Generate TTS for all paragraphs in parallel."""
     tasks = []
     for i, paragraph in enumerate(paragraphs):
         tasks.append(generate_tts_async(paragraph, os.path.join(audio_dir, f"audio_{i}.mp3"), voice_id, speed, pitch))
     await asyncio.gather(*tasks)
+
 
 async def generate_tts_async(text, output_path, voice_id, speed, pitch):
     """Async TTS generation for parallel execution."""
@@ -105,26 +111,40 @@ async def generate_tts_async(text, output_path, voice_id, speed, pitch):
     await communicate.save(output_path)
     return output_path
 
+
+# ─────────────────────────────────────────────
+# Probe Helpers
+# ─────────────────────────────────────────────
+
 def get_video_duration(video_path):
-    cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path]
+    cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+           '-of', 'default=noprint_wrappers=1:nokey=1', video_path]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     return float(result.stdout.strip())
 
+
 def get_video_resolution(video_path):
-    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', video_path]
+    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+           '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', video_path]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     res = result.stdout.strip().split('x')
     w, h = int(res[0]), int(res[1])
-    # Cap resolution at 1080p for stability on Streamlit Cloud
     if w > 1920:
         h = int(h * (1920 / w))
         w = 1920
     return w, h
 
+
 def get_audio_duration(audio_path):
-    cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]
+    cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+           '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     return float(result.stdout.strip())
+
+
+# ─────────────────────────────────────────────
+# Step 1: Split video into segments (with audio)
+# ─────────────────────────────────────────────
 
 def split_video(video_path, num_segments, output_dir):
     """Split video into segments with re-encoding for accurate frame-level cutting."""
@@ -134,8 +154,6 @@ def split_video(video_path, num_segments, output_dir):
     for i in range(num_segments):
         start_time = i * segment_duration
         output_path = os.path.join(output_dir, f"segment_{i}.mp4")
-        # Use -c:v libx264 -preset fast -c:a aac for accurate segment splitting
-        # (not -c copy, which cuts at keyframes only and causes duration inaccuracy)
         cmd = ['ffmpeg', '-y', '-ss', str(start_time), '-t', str(segment_duration),
                '-i', video_path, '-c:v', 'libx264', '-preset', 'fast', '-c:a', 'aac',
                '-avoid_negative_ts', 'make_zero', output_path]
@@ -143,107 +161,241 @@ def split_video(video_path, num_segments, output_dir):
         segments.append(output_path)
     return segments, segment_duration
 
-def process_segment_with_retry(index, text, video_segment, audio_path, final_segments_dir, voice_id, speed, pitch, play_dur, freeze1_dur, freeze1_zoom, freeze2_dur, freeze2_zoom, max_retries=3):
-    """Process segment with retry logic"""
+
+# ─────────────────────────────────────────────
+# Step 2: Speed-adjust each segment to match its TTS audio duration
+# ─────────────────────────────────────────────
+
+def speed_adjust_segment(index, video_segment, audio_path, adjusted_dir):
+    """Speed-adjust a video segment to match its TTS audio duration.
+    Returns the path to the adjusted segment (video + audio combined).
+    Cleans up the original segment after success."""
+    audio_duration = get_audio_duration(audio_path)
+    orig_duration = get_video_duration(video_segment)
+    output_path = os.path.join(adjusted_dir, f"adjusted_{index}.mp4")
+
+    if abs(audio_duration - orig_duration) < 0.5:
+        # No speed adjustment needed, just copy
+        cmd = ['ffmpeg', '-y', '-i', video_segment, '-c', 'copy', output_path]
+    else:
+        speed_factor = audio_duration / orig_duration
+        filter_complex = (
+            f"[0:v]setpts=PTS*{speed_factor}[v];"
+            f"[0:a]atempo={1/speed_factor}[a];"
+            f"[v][a]concat=n=1:v=1:a=1"
+        )
+        # For very large speed factors, chain atempo (max 2.0 per chain)
+        if speed_factor > 2.0:
+            chains = []
+            remaining = speed_factor
+            while remaining > 2.0:
+                chains.append("atempo=2.0")
+                remaining /= 2.0
+            chains.append(f"atempo={remaining}")
+            atempo_str = ",".join(chains)
+            filter_complex = (
+                f"[0:v]setpts=PTS*{speed_factor}[v];"
+                f"[0:a]{atempo_str}[a];"
+                f"[v][a]concat=n=1:v=1:a=1"
+            )
+
+        cmd = ['ffmpeg', '-y', '-i', video_segment,
+               '-filter_complex', filter_complex, '-map', '[v]', '-map', '[a]',
+               '-c:v', 'libx264', '-preset', 'fast', '-c:a', 'aac', output_path]
+
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode == 0 and os.path.exists(output_path):
+        if os.path.exists(video_segment):
+            os.remove(video_segment)
+        return output_path
+    else:
+        raise Exception(f"Speed adjust failed for segment {index}: {result.stderr}")
+
+
+# ─────────────────────────────────────────────
+# Step 3: Merge all speed-adjusted segments into one merged video
+# ─────────────────────────────────────────────
+
+def merge_speed_adjusted_segments(adjusted_segments, output_path):
+    """Merge all speed-adjusted segments into a single video."""
+    concat_file = output_path + "_concat.txt"
+    with open(concat_file, 'w') as f:
+        for seg in adjusted_segments:
+            f.write(f"file '{os.path.abspath(seg)}'\n")
+    cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+           '-i', concat_file, '-c', 'copy', output_path]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if os.path.exists(concat_file):
+        os.remove(concat_file)
+    if result.returncode != 0:
+        raise Exception(f"Merge speed-adjusted segments failed: {result.stderr}")
+    # Clean up adjusted segments
+    for seg in adjusted_segments:
+        if os.path.exists(seg):
+            os.remove(seg)
+
+
+# ─────────────────────────────────────────────
+# Step 4: Split merged video into chunks for memory-safe processing
+# ─────────────────────────────────────────────
+
+def split_into_chunks(merged_path, chunk_duration, output_dir):
+    """Split merged video into chunks for memory-safe processing."""
+    duration = get_video_duration(merged_path)
+    chunks = []
+    num_chunks = math.ceil(duration / chunk_duration)
+    for i in range(num_chunks):
+        start_time = i * chunk_duration
+        remaining = min(chunk_duration, duration - start_time)
+        output_path = os.path.join(output_dir, f"chunk_{i}.mp4")
+        cmd = ['ffmpeg', '-y', '-ss', str(start_time), '-t', str(remaining),
+               '-i', merged_path, '-c:v', 'libx264', '-preset', 'fast', '-c:a', 'aac',
+               '-avoid_negative_ts', 'make_zero', output_path]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        chunks.append(output_path)
+    # Clean up merged video after splitting
+    if os.path.exists(merged_path):
+        os.remove(merged_path)
+    return chunks
+
+
+# ─────────────────────────────────────────────
+# Step 5: Apply cycle repeat (play + freeze frames + zoom) to each chunk
+# ─────────────────────────────────────────────
+
+def build_cycle_filter(video_path, audio_path, chunk_duration,
+                       play_dur, freeze1_dur, freeze2_dur,
+                       freeze1_zoom, freeze2_zoom):
+    """Build FFmpeg filter complex for cycle repeat on a chunk.
+    Video only (audio is passed through)."""
+    width, height = get_video_resolution(video_path)
+    fps = 30
+    cycle_duration = play_dur + freeze1_dur + freeze2_dur
+    num_cycles = math.ceil(chunk_duration / cycle_duration)
+
+    # Cap resolution at 720p
+    if width > 1280:
+        height = int(height * (1280 / width))
+        width = 1280
+
+    res_str = f"{width}x{height}"
+
+    # Build freeze filters
+    f1_frames = freeze1_dur * fps
+    f2_frames = freeze2_dur * fps
+
+    def make_zoom_filter(duration_frames, zoom_type):
+        if zoom_type == "Zoom In":
+            return (f"scale={width}:{height},setsar=1,"
+                    f"zoompan=z='min(1+0.15*on/{duration_frames},1.15)':"
+                    f"d={duration_frames}:s={res_str}:fps={fps}")
+        elif zoom_type == "Zoom Out":
+            return (f"scale={width}:{height},setsar=1,"
+                    f"zoompan=z='max(1.15-0.15*on/{duration_frames},1.0)':"
+                    f"d={duration_frames}:s={res_str}:fps={fps}")
+        return None
+
+    f1_z = make_zoom_filter(f1_frames, freeze1_zoom)
+    f2_z = make_zoom_filter(f2_frames, freeze2_zoom)
+
+    filter_parts = []
+    concat_inputs = []
+
+    for i in range(num_cycles):
+        curr = i * cycle_duration
+
+        # Play section
+        filter_parts.append(
+            f"[0:v]trim=start={curr}:end={min(curr + play_dur, chunk_duration)},"
+            f"setpts=PTS-STARTPTS[vplay_{i}];")
+        concat_inputs.append(f"[vplay_{i}]")
+
+        # Freeze 1
+        f1_start = curr + play_dur
+        if f1_start < chunk_duration:
+            if f1_z:
+                filter_parts.append(
+                    f"[0:v]trim=start={f1_start},select=eq(n\\,0),"
+                    f"setpts=PTS-STARTPTS{f1_z}[vf1_{i}];")
+            else:
+                filter_parts.append(
+                    f"[0:v]trim=start={f1_start},select=eq(n\\,0),"
+                    f"setpts=PTS-STARTPTS,loop=loop=-1:size=1:start=0,"
+                    f"trim=duration={freeze1_dur}[vf1_{i}];")
+            concat_inputs.append(f"[vf1_{i}]")
+
+        # Freeze 2
+        f2_start = curr + play_dur + freeze1_dur
+        if f2_start < chunk_duration:
+            if f2_z:
+                filter_parts.append(
+                    f"[0:v]trim=start={f2_start},select=eq(n\\,0),"
+                    f"setpts=PTS-STARTPTS{f2_z}[vf2_{i}];")
+            else:
+                filter_parts.append(
+                    f"[0:v]trim=start={f2_start},select=eq(n\\,0),"
+                    f"setpts=PTS-STARTPTS,loop=loop=-1:size=1:start=0,"
+                    f"trim=duration={freeze2_dur}[vf2_{i}];")
+            concat_inputs.append(f"[vf2_{i}]")
+
+    # Concatenate video parts, then combine with audio
+    filter_parts.append(
+        f"{''.join(concat_inputs)}concat=n={len(concat_inputs)}:v=1:a=0[vcomb];")
+    filter_parts.append(
+        f"[vcomb][1:a]concat=n=1:v=1:a=1,trim=duration={chunk_duration}[v]")
+
+    return ''.join(filter_parts)
+
+
+def process_chunk_with_retry(index, chunk_path, chunk_duration,
+                             final_dir,
+                             play_dur, freeze1_dur, freeze2_dur,
+                             freeze1_zoom, freeze2_zoom,
+                             max_retries=3):
+    """Process a single chunk with cycle repeat and zoom effects."""
+    # We need an audio file for the chunk - extract from the chunk itself
+    audio_path = os.path.join(final_dir, f"chunk_audio_{index}.mp3")
+    # Extract audio from chunk
+    cmd = ['ffmpeg', '-y', '-i', chunk_path, '-vn', '-acodec', 'libmp3lame',
+           '-ab', '128k', audio_path]
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
     for attempt in range(max_retries):
         try:
-            # 1. Generate TTS if not already done (thread-safe single call)
-            if not os.path.exists(audio_path):
-                generate_tts(text, audio_path, voice_id, speed, pitch)
-            
-            audio_duration = get_audio_duration(audio_path)
-            orig_segment_duration = get_video_duration(video_segment)
-            output_segment = os.path.join(final_segments_dir, f"segment_{index}.mp4")
-            
-            # 2. Build FFmpeg filter complex
-            width, height = get_video_resolution(video_segment)
-            cycle_duration = play_dur + freeze1_dur + freeze2_dur
-            num_cycles = math.ceil(audio_duration / cycle_duration)
-            
-            # Cap resolution at 720p to reduce memory usage on Streamlit Cloud
-            if width > 1280:
-                height = int(height * (1280 / width))
-                width = 1280
-            
-            res_str = f"{width}x{height}"
-            fps = 30
-            # Calculate total frames for each freeze section
-            f1_frames = freeze1_dur * fps
-            f2_frames = freeze2_dur * fps
-            
-            # Zoom expressions: total zoom change over freeze_duration
-            # Zoom In: from 1.0 to 1.15 (15% zoom) over freeze duration
-            # Zoom Out: from 1.15 to 1.0 (back to normal) over freeze duration
-            # Use on=1 to track frame number, compute zoom per frame
-            zoom_in = f"scale={width}:{height},setsar=1,zoompan=z='min(1+0.15*on/{f1_frames},1.15)':d={f1_frames}:s={res_str}:fps={fps}"
-            zoom_out = f"scale={width}:{height},setsar=1,zoompan=z='max(1.15-0.15*on/{f1_frames},1.0)':d={f1_frames}:s={res_str}:fps={fps}"
-            no_zoom = f"scale={width}:{height},setsar=1,loop=loop=-1:size=1:start=0,trim=duration={freeze1_dur}"
-            
-            # Build freeze1 filter (for freeze1_dur duration)
-            f1_frames_calc = freeze1_dur * fps
-            if freeze1_zoom == "Zoom In":
-                f1_z = f"scale={width}:{height},setsar=1,zoompan=z='min(1+0.15*on/{f1_frames_calc},1.15)':d={f1_frames_calc}:s={res_str}:fps={fps}"
-            elif freeze1_zoom == "Zoom Out":
-                f1_z = f"scale={width}:{height},setsar=1,zoompan=z='max(1.15-0.15*on/{f1_frames_calc},1.0)':d={f1_frames_calc}:s={res_str}:fps={fps}"
-            else:
-                f1_z = None  # No zoom, just freeze frame
-            
-            # Build freeze2 filter (for freeze2_dur duration)
-            f2_frames_calc = freeze2_dur * fps
-            if freeze2_zoom == "Zoom In":
-                f2_z = f"scale={width}:{height},setsar=1,zoompan=z='min(1+0.15*on/{f2_frames_calc},1.15)':d={f2_frames_calc}:s={res_str}:fps={fps}"
-            elif freeze2_zoom == "Zoom Out":
-                f2_z = f"scale={width}:{height},setsar=1,zoompan=z='max(1.15-0.15*on/{f2_frames_calc},1.0)':d={f2_frames_calc}:s={res_str}:fps={fps}"
-            else:
-                f2_z = None  # No zoom, just freeze frame
-            
-            filter_parts = []
-            concat_inputs = []
-            speed_factor = audio_duration / orig_segment_duration
-            filter_parts.append(f"[0:v]setpts=PTS*{speed_factor}[v_speed];")
-            
-            for i in range(num_cycles):
-                curr = i * cycle_duration
-                # Play section: normal video playback
-                filter_parts.append(f"[v_speed]trim=start={curr}:end={curr+play_dur},setpts=PTS-STARTPTS[vplay_{i}];")
-                concat_inputs.append(f"[vplay_{i}]")
-                
-                # Freeze 1 section: freeze frame with optional zoom
-                f1_trim_start = curr + play_dur
-                if f1_z:
-                    filter_parts.append(f"[v_speed]trim=start={f1_trim_start},select=eq(n\\,0),setpts=PTS-STARTPTS{f1_z}[vf1_{i}];")
-                else:
-                    filter_parts.append(f"[v_speed]trim=start={f1_trim_start},select=eq(n\\,0),setpts=PTS-STARTPTS,loop=loop=-1:size=1:start=0,trim=duration={freeze1_dur}[vf1_{i}];")
-                concat_inputs.append(f"[vf1_{i}]")
-                
-                # Freeze 2 section: freeze frame with optional zoom
-                f2_trim_start = curr + play_dur + freeze1_dur
-                if f2_z:
-                    filter_parts.append(f"[v_speed]trim=start={f2_trim_start},select=eq(n\\,0),setpts=PTS-STARTPTS{f2_z}[vf2_{i}];")
-                else:
-                    filter_parts.append(f"[v_speed]trim=start={f2_trim_start},select=eq(n\\,0),setpts=PTS-STARTPTS,loop=loop=-1:size=1:start=0,trim=duration={freeze2_dur}[vf2_{i}];")
-                concat_inputs.append(f"[vf2_{i}]")
-            
-            filter_parts.append(f"{''.join(concat_inputs)}concat=n={len(concat_inputs)}:v=1:a=0[vcomb];")
-            filter_complex = ''.join(filter_parts) + f"[vcomb][1:a]concat=n=1:v=1:a=1,trim=duration={audio_duration}[v]"
-            
-            cmd = ['ffmpeg', '-y', '-i', video_segment, '-i', audio_path, '-filter_complex', filter_complex, '-map', '[v]', '-shortest', output_segment]
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            
-            if result.returncode == 0 and os.path.exists(output_segment):
-                # Clean up temp segment after successful processing to save disk space
-                if os.path.exists(video_segment):
-                    os.remove(video_segment)
-                return output_segment
+            output_path = os.path.join(final_dir, f"chunk_processed_{index}.mp4")
+            filter_complex = build_cycle_filter(
+                chunk_path, audio_path, chunk_duration,
+                play_dur, freeze1_dur, freeze2_dur,
+                freeze1_zoom, freeze2_zoom
+            )
+
+            cmd = ['ffmpeg', '-y', '-i', chunk_path, '-i', audio_path,
+                   '-filter_complex', filter_complex, '-map', '[v]',
+                   '-c:v', 'libx264', '-preset', 'fast', '-c:a', 'aac',
+                   '-shortest', output_path]
+            result = subprocess.run(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True)
+
+            if result.returncode == 0 and os.path.exists(output_path):
+                # Clean up original chunk and extracted audio
+                if os.path.exists(chunk_path):
+                    os.remove(chunk_path)
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+                return output_path
             else:
                 raise Exception(f"FFmpeg failed: {result.stderr}")
-                
         except Exception as e:
             if attempt < max_retries - 1:
-                time.sleep(2)  # Wait before retry
+                time.sleep(2)
                 continue
             else:
                 raise e
+
+
+# ─────────────────────────────────────────────
+# Step 6: Merge all processed chunks into final video
+# ─────────────────────────────────────────────
 
 def merge_videos(video_list, output_path):
     valid_videos = [v for v in video_list if v is not None and os.path.exists(v)]
@@ -253,12 +405,19 @@ def merge_videos(video_list, output_path):
     with open(concat_file, 'w') as f:
         for video in valid_videos:
             f.write(f"file '{os.path.abspath(video)}'\n")
-    cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_file, '-c', 'copy', output_path]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+           '-i', concat_file, '-c', 'copy', output_path]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
     if os.path.exists(concat_file):
         os.remove(concat_file)
     if result.returncode != 0:
         raise Exception(f"Merge Error: {result.stderr}")
+
+
+# ─────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────
 
 def main():
     st.title("🎬 Video & Text Processor with TTS")
@@ -273,7 +432,8 @@ def main():
         with col2:
             selected_emotion = st.selectbox("Emotion", options=[e["name"] for e in EMOTIONS])
             emotion_data = next(e for e in EMOTIONS if e["name"] == selected_emotion)
-        final_speed, final_pitch = style_data["speed"] + emotion_data["s"], style_data["pitch"] + emotion_data["p"]
+        final_speed, final_pitch = (style_data["speed"] + emotion_data["s"],
+                                    style_data["pitch"] + emotion_data["p"])
         st.caption(f"📊 Speed: {final_speed}%, Pitch: {final_pitch}Hz")
         st.markdown("---")
         play_duration = st.slider("▶️ Play Duration (s)", 1, 5, 3)
@@ -295,99 +455,151 @@ def main():
         if not text_input or not video_file:
             st.error("❌ Provide text and video.")
             return
-        
-        # Early cleanup of previous temp files
+
+        # Setup temp directories
         temp_dir = "temp_processing"
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
-            
-        audio_dir, video_dir, final_segments_dir = [os.path.join(temp_dir, d) for d in ["audio", "video", "final_segments"]]
-        for d in [audio_dir, video_dir, final_segments_dir]:
+
+        audio_dir = os.path.join(temp_dir, "audio")
+        video_dir = os.path.join(temp_dir, "video")
+        adjusted_dir = os.path.join(temp_dir, "adjusted")
+        chunks_dir = os.path.join(temp_dir, "chunks")
+        final_dir = os.path.join(temp_dir, "final_chunks")
+        for d in [audio_dir, video_dir, adjusted_dir, chunks_dir, final_dir]:
             os.makedirs(d, exist_ok=True)
+
         video_path = os.path.join(video_dir, "input_video.mp4")
-        
+
         # Chunk-by-chunk write to save RAM
         with open(video_path, "wb") as f:
             while chunk := video_file.read(8192):
                 f.write(chunk)
-        
+
         paragraphs = count_paragraphs(text_input)
         num_paragraphs = len(paragraphs)
         progress_bar = st.progress(0)
-        
-        # Force garbage collection to free RAM after file write
+
+        # Free RAM
         del video_file
         gc.collect()
-        
+
+        # Chunk duration for memory-safe processing (30 seconds)
+        CHUNK_DURATION = 30
+
         with st.status("🚀 Processing...", expanded=True) as status:
-            # Step 1: Generate all TTS audio in parallel using asyncio (network I/O, not CPU-bound)
+
+            # ── Step 1: Generate TTS audio ──
             st.write("🎙️ Generating TTS audio...")
-            asyncio.run(generate_all_tts(paragraphs, audio_dir, voice_id, final_speed, final_pitch))
+            asyncio.run(generate_all_tts(paragraphs, audio_dir, voice_id,
+                                         final_speed, final_pitch))
             st.write("✅ TTS generation complete.")
-            
-            # Step 2: Split video into segments
-            st.write("🎞️ Splitting video...")
+
+            # ── Step 2: Split video into segments ──
+            st.write("🎞️ Splitting video into segments...")
             video_segments, _ = split_video(video_path, num_paragraphs, video_dir)
-            st.write("✅ Video splitting complete.")
-            
-            # Delete the original uploaded video to save disk space
+            st.write(f"✅ Split into {num_paragraphs} segments.")
+
+            # Delete original uploaded video
             if os.path.exists(video_path):
                 os.remove(video_path)
-                st.write("🗑️ Original uploaded video removed to save space.")
-            
-            # Force garbage collection to free RAM
-            gc.collect()
-            
-            # Step 3: Edit video segments with 2 workers (CPU-bound FFmpeg)
-            st.write("🎬 Editing video segments...")
-            final_video_segments = [None] * num_paragraphs
-            completed = 0
+                st.write("🗑️ Original video removed.")
+
+            # ── Step 3: Speed-adjust each segment to match TTS audio ──
+            st.write("⚡ Speed-adjusting segments to match TTS audio...")
+            adjusted_segments = [None] * num_paragraphs
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                future_to_index = {
+                futures = {
                     executor.submit(
-                        process_segment_with_retry,
-                        i, paragraphs[i], video_segments[i],
+                        speed_adjust_segment,
+                        i, video_segments[i],
                         os.path.join(audio_dir, f"audio_{i}.mp3"),
-                        final_segments_dir, voice_id, final_speed, final_pitch,
-                        play_duration, freeze1_duration, freeze1_zoom,
-                        freeze2_duration, freeze2_zoom
-                    ): i
-                    for i in range(num_paragraphs)
+                        adjusted_dir
+                    ): i for i in range(num_paragraphs)
                 }
-                for future in concurrent.futures.as_completed(future_to_index):
-                    index = future_to_index[future]
+                for future in concurrent.futures.as_completed(futures):
+                    idx = futures[future]
                     try:
-                        final_video_segments[index] = future.result()
-                        completed += 1
-                        st.write(f"✅ Segment {index+1}/{num_paragraphs} processed")
-                        progress_bar.progress(completed / num_paragraphs)
+                        adjusted_segments[idx] = future.result()
+                        st.write(f"✅ Segment {idx+1}/{num_paragraphs} speed-adjusted")
+                        progress_bar.progress((idx + 1) / num_paragraphs / 4)
                     except Exception as e:
-                        st.error(f"❌ Failed segment {index+1} after retries: {str(e)}")
-            
-            # Step 4: Merge final video
+                        st.error(f"❌ Speed adjust failed for segment {idx+1}: {e}")
+            gc.collect()
+            st.write("✅ All segments speed-adjusted.")
+
+            # ── Step 4: Merge all speed-adjusted segments ──
+            st.write("🔗 Merging speed-adjusted segments...")
+            merged_video = os.path.join(temp_dir, "merged_video.mp4")
+            merge_speed_adjusted_segments(adjusted_segments, merged_video)
+            st.write("✅ Segments merged into single video.")
+            gc.collect()
+
+            # ── Step 5: Split merged video into chunks ──
+            st.write("🧩 Splitting into processing chunks...")
+            merged_duration = get_video_duration(merged_video)
+            chunks = split_into_chunks(merged_video, CHUNK_DURATION, chunks_dir)
+            st.write(f"✅ Split into {len(chunks)} chunks ({CHUNK_DURATION}s each).")
+
+            # ── Step 6: Apply cycle repeat to each chunk ──
+            st.write("🎬 Applying cycle repeat (play + freeze + zoom)...")
+            processed_chunks = [None] * len(chunks)
+            chunk_durations = []
+            for c in chunks:
+                if os.path.exists(c):
+                    chunk_durations.append(get_video_duration(c))
+                else:
+                    chunk_durations.append(CHUNK_DURATION)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                futures = {
+                    executor.submit(
+                        process_chunk_with_retry,
+                        i, chunks[i], chunk_durations[i],
+                        final_dir,
+                        play_duration, freeze1_duration, freeze2_duration,
+                        freeze1_zoom, freeze2_zoom
+                    ): i for i in range(len(chunks))
+                }
+                completed = 0
+                for future in concurrent.futures.as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        processed_chunks[idx] = future.result()
+                        completed += 1
+                        st.write(f"✅ Chunk {idx+1}/{len(chunks)} processed")
+                        progress_bar.progress(
+                            0.25 + 0.75 * completed / len(chunks))
+                    except Exception as e:
+                        st.error(f"❌ Chunk {idx+1} failed: {e}")
+            gc.collect()
+            st.write("✅ All chunks processed with cycle repeat.")
+
+            # ── Step 7: Merge processed chunks into final video ──
             st.write("🎞️ Merging final video...")
             output_video = "final_output.mp4"
             try:
-                merge_videos(final_video_segments, output_video)
+                merge_videos(processed_chunks, output_video)
                 status.update(label="✅ Complete!", state="complete")
             except Exception as e:
-                st.error(f"❌ Merge Failed: {str(e)}")
+                st.error(f"❌ Final merge failed: {e}")
                 status.update(label="❌ Failed", state="error")
                 return
-        
+
+        # Download button
         if os.path.exists(output_video):
-            # Download directly from file path without loading into RAM
             st.download_button(
                 "📥 Download Final Video",
                 data=open(output_video, "rb"),
                 file_name="output_video.mp4",
                 mime="video/mp4"
             )
-        
-        # Cleanup all temp files
+
+        # Final cleanup
         shutil.rmtree(temp_dir, ignore_errors=True)
         if os.path.exists(output_video):
             os.remove(output_video)
+
 
 if __name__ == "__main__":
     main()
