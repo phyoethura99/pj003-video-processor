@@ -77,6 +77,12 @@ def get_video_duration(video_path):
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     return float(result.stdout.strip())
 
+def get_video_resolution(video_path):
+    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', video_path]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    res = result.stdout.strip().split('x')
+    return int(res[0]), int(res[1])
+
 def get_audio_duration(audio_path):
     cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -107,13 +113,15 @@ def process_segment_with_retry(index, text, video_segment, audio_path, final_seg
             output_segment = os.path.join(final_segments_dir, f"segment_{index}.mp4")
             
             # 2. Build FFmpeg filter complex
+            width, height = get_video_resolution(video_segment)
             cycle_duration = play_dur + freeze1_dur + freeze2_dur
             num_cycles = math.ceil(audio_duration / cycle_duration)
             
-            # Add scale and setsar before zoompan to ensure consistent resolution
-            zoom_in = "scale=1280:720,setsar=1,zoompan=z='min(zoom+0.0015,1.1)':d=1:s=1280x720:fps=30"
-            zoom_out = "scale=1280:720,setsar=1,zoompan=z='max(zoom-0.0015,1.0)':d=1:s=1280x720:fps=30"
-            no_zoom = "scale=1280:720,setsar=1"
+            # Use original resolution for zoompan to preserve quality
+            res_str = f"{width}x{height}"
+            zoom_in = f"scale={width}:{height},setsar=1,zoompan=z='min(zoom+0.0015,1.1)':d=1:s={res_str}:fps=30"
+            zoom_out = f"scale={width}:{height},setsar=1,zoompan=z='max(zoom-0.0015,1.0)':d=1:s={res_str}:fps=30"
+            no_zoom = f"scale={width}:{height},setsar=1"
             
             f1_z = zoom_in if freeze1_zoom == "Zoom In" else (zoom_out if freeze1_zoom == "Zoom Out" else no_zoom)
             f2_z = zoom_in if freeze2_zoom == "Zoom In" else (zoom_out if freeze2_zoom == "Zoom Out" else no_zoom)
