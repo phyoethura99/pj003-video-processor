@@ -514,7 +514,7 @@ def main():
                 if needs_preprocess:
                     optimized_video_path = os.path.join(video_dir, "optimized_900p_24fps.mp4")
                     progress_detail.markdown(f"⚙️ Downscaling to 900p + 24fps (Original: {orig_width}×{orig_height})...")
-                    cmd = ['ffmpeg', '-y', '-i', video_path, '-vf', "scale=w='min(iw,1600)':h='min(ih,900)':force_original_aspect_ratio=decrease",
+                    cmd = ['ffmpeg', '-y', '-i', video_path, '-vf', "scale='if(gt(iw,ih),1600,-2)':'if(gt(iw,ih),-2,1600)':force_original_aspect_ratio=decrease",
                            '-r', '24', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', optimized_video_path]
                     subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 else:
